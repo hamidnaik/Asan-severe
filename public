@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>آسان‌خدمت</title>
+    <style>
+        body { font-family: Tahoma; max-width: 400px; margin: auto; padding: 15px; background: #f0f0f0; }
+        .card { background: white; padding: 15px; border-radius: 10px; margin-bottom: 10px; box-shadow: 0 2px 5px #ccc; }
+        input, button { width: 100%; padding: 10px; margin: 5px 0; border-radius: 8px; border: 1px solid #ddd; }
+        button { background: #007bff; color: white; font-weight: bold; border: none; }
+        .product-item { border-bottom: 1px solid #eee; padding: 8px 0; }
+    </style>
+</head>
+<body>
+    <h1>📱 آسان‌خدمت</h1>
+    <div id="auth-section" class="card">
+        <h3>ورود / ثبت‌نام</h3>
+        <input type="text" id="username" placeholder="نام کاربری" />
+        <input type="email" id="email" placeholder="ایمیل" />
+        <input type="password" id="password" placeholder="رمز عبور" />
+        <select id="role-select">
+            <option value="customer">مشتری</option>
+            <option value="seller">فروشنده</option>
+        </select>
+        <button onclick="register()">ثبت‌نام</button>
+        <button onclick="login()" style="background:#28a745;">ورود</button>
+        <div id="auth-msg"></div>
+    </div>
+    <div id="dashboard" style="display:none;">
+        <div class="card">
+            <p>خوش آمدی: <span id="user-info"></span> <button onclick="logout()" style="width:auto;background:red;">خروج</button></p>
+        </div>
+        <div id="seller-panel" class="card" style="display:none;">
+            <h4>ثبت محصول</h4>
+            <input type="text" id="prod-name" placeholder="نام" />
+            <input type="number" id="prod-price" placeholder="قیمت" />
+            <input type="number" id="prod-stock" placeholder="موجودی" />
+            <button onclick="createProduct()">ثبت</button>
+        </div>
+        <div class="card">
+            <h4>🛒 محصولات</h4>
+            <button onclick="loadProducts()">بارگذاری</button>
+            <div id="product-list"></div>
+        </div>
+        <div id="customer-panel" class="card" style="display:none;">
+            <h4>ثبت سفارش</h4>
+            <input type="text" id="order-product-id" placeholder="شناسه محصول" />
+            <input type="number" id="order-qty" placeholder="تعداد" />
+            <button onclick="createOrder()">ثبت</button>
+            <div id="order-msg"></div>
+        </div>
+    </div>
+    <script>
+        const API_BASE = '/api';
+        async function request(endpoint, method='GET', body=null) {
+            const opts = { method, headers: {'Content-Type':'application/json'}, credentials:'include' };
+            if (body) opts.body = JSON.stringify(body);
+            const res = await fetch(API_BASE+endpoint, opts);
+            return res.json();
+        }
+        async function register() {
+            const username = document.getElementById('username').value;
+            const email = document.getElementById('email').value || 'test@mail.com';
+            const password = document.getElementById('password').value;
+            const role = document.getElementById('role-select').value;
+            const msg = document.getElementById('auth-msg');
+            const data = await request('/auth/register', 'POST', {username, email, password, role});
+            msg.innerHTML = data.message || data.error;
+            msg.style.color = data.error ? 'red' : 'green';
+        }
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const msg = document.getElementById('auth-msg');
+            const data = await request('/auth/login', 'POST', {username, password});
+            if (data.error) { msg.innerHTML = data.error; msg.style.color='red'; return; }
+            msg.innerHTML = '✅ وارد شدید';
+            document.getElementById('auth-section').style.display = 'none';
+            document.getElementById('dashboard').style.display = 'block';
+            document.getElementById('user-info').innerText = data.user.username;
+            if (data.user.role === 'seller') document.getElementById('seller-panel').style.display = 'block';
+            if (data.user.role === 'customer') document.getElementById('customer-panel').style.display = 'block';
+            loadProducts();
+        }
+        async function logout() {
+            await request('/auth/logout', 'POST');
+            location.reload();
+        }
+        async function loadProducts() {
+            const data = await request('/products');
+            const list = document.getElementById('product-list');
+            list.innerHTML = '';
+            data.forEach(p => {
+                list.innerHTML += `<div class="product-item">🆔 ${p.id} | ${p.name} - ${p.price} تومان (موجودی: ${p.stock_quantity})</div>`;
+            });
+        }
+        async function createProduct() {
+            const name = document.getElementById('prod-name').value;
+            const price = document.getElementById('prod-price').value;
+            const stock = document.getElementById('prod-stock').value;
+            await request('/products', 'POST', {name, description:'', price, stock_quantity:stock});
+            loadProducts();
+        }
+        async function createOrder() {
+            const product_id = document.getElementById('order-product-id').value;
+            const quantity = parseInt(document.getElementById('order-qty').value);
+            const msg = document.getElementById('order-msg');
+            const data = await request('/orders', 'POST', {items:[{product_id, quantity}]});
+            msg.innerHTML = data.message || data.error;
+            msg.style.color = data.error ? 'red' : 'green';
+            if (!data.error) loadProducts();
+        }
+        window.onload = () => {
+            fetch('/api/products', {credentials:'include'})
+                .then(res => res.json())
+                .then(data => {
+                    if (Array.isArray(data)) {
+                        document.getElementById('auth-section').style.display = 'none';
+                        document.getElementById('dashboard').style.display = 'block';
+                        document.getElementById('user-info').innerText = 'کاربر';
+                        loadProducts();
+                    }
+                }).catch(() => {});
+        }
+    </script>
+</body>
+</html>
