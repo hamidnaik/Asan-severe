@@ -1,0 +1,300 @@
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
+const cors = require('cors');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = 'SECRET_KEY_CHANGE_ME';
+
+// اتصال به SQLite
+const db = new sqlite3.Database('./database.db');
+
+app.use(express.json());
+app.use(cookieParser());
+app.use(cors({ origin: true, credentials: true }));
+
+// ============ ساخت جدول‌های دیتابیس ============
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT CHECK(role IN ('customer','seller','admin')) DEFAULT 'customer',
+      is_verified BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      seller_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      price REAL NOT NULL,
+      stock_quantity INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(seller_id) REFERENCES users(id)
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      status TEXT DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(customer_id) REFERENCES users(id)
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      price_at_time REAL NOT NULL,
+      FOREIGN KEY(order_id) REFERENCES orders(id),
+      FOREIGN KEY(product_id) REFERENCES products(id)
+    )
+  `);
+
+  // ساخت ادمین پیش‌فرض
+  const adminPassword = bcrypt.hashSync('Admin@123', 10);
+  db.run(`
+    INSERT OR IGNORE INTO users (username, email, password_hash, role, is_verified) 
+    VALUES ('admin', 'admin@site.com', ?, 'admin', 1)
+  `, [adminPassword], function(err) {
+    if (!err) console.log('✅ ادمین ساخته شد: admin / Admin@123');
+  });
+});
+
+// ============ API‌ها ============
+
+// ثبت‌نام
+app.post('/api/auth/register', async (req, res) => {
+  const { username, email, password, role = 'customer' } = req.body;
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'تمامی فیلدها الزامی است' });
+  }
+  
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    db.run(
+      'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)',
+      [username, email, hashed, role],
+      function(err) {
+        if (err) {
+          if (err.message.includes('UNIQUE')) {
+            return res.status(400).json({ error: 'نام کاربری یا ایمیل تکراری است' });
+          }
+          return res.status(500).json({ error: 'خطای دیتابیس' });
+        }
+        res.json({ 
+          message: '✅ ثبت‌نام موفق', 
+          user: { id: this.lastID, username, email, role } 
+        });
+      }
+    );
+  } catch (err) {
+    res.status(500).json({ error: 'خطای سرور' });
+  }
+});
+
+// ورود
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'نام کاربری و رمز الزامی است' });
+  }
+  
+  db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
+    if (err || !user) {
+      return res.status(401).json({ error: 'نام کاربری یا رمز اشتباه است' });
+    }
+    
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: 'نام کاربری یا رمز اشتباه است' });
+    }
+    
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role }, 
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    
+    res.cookie('token', token, { 
+      httpOnly: true, 
+      maxAge: 24 * 60 * 60 * 1000,
+      sameSite: 'lax'
+    });
+    
+    res.json({ 
+      message: '✅ ورود موفق', 
+      user: { id: user.id, username: user.username, role: user.role, is_verified: user.is_verified } 
+    });
+  });
+});
+
+// خروج
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ message: 'خارج شدید' });
+});
+
+// دریافت محصولات
+app.get('/api/products', (req, res) => {
+  db.all(`
+    SELECT p.*, u.username as seller_name 
+    FROM products p 
+    JOIN users u ON p.seller_id = u.id 
+    WHERE p.stock_quantity > 0
+  `, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+// ثبت محصول
+app.post('/api/products', (req, res) => {
+  const { name, description, price, stock_quantity } = req.body;
+  const token = req.cookies.token;
+  
+  if (!token) return res.status(401).json({ error: 'وارد شوید' });
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'seller' && decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'دسترسی غیرمجاز' });
+    }
+    
+    db.run(
+      'INSERT INTO products (seller_id, name, description, price, stock_quantity) VALUES (?, ?, ?, ?, ?)',
+      [decoded.id, name, description || '', price, stock_quantity || 0],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ message: '✅ محصول ثبت شد', id: this.lastID });
+      }
+    );
+  } catch (err) {
+    res.status(401).json({ error: 'توکن نامعتبر' });
+  }
+});
+
+// ثبت سفارش
+app.post('/api/orders', (req, res) => {
+  const { items } = req.body;
+  const token = req.cookies.token;
+  
+  if (!token) return res.status(401).json({ error: 'وارد شوید' });
+  if (!items || items.length === 0) return res.status(400).json({ error: 'سبد خرید خالی است' });
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'customer') {
+      return res.status(403).json({ error: 'فقط مشتریان میتوانند سفارش دهند' });
+    }
+    
+    let total = 0;
+    const orderItems = [];
+    let processed = 0;
+    
+    const checkProducts = () => {
+      if (processed >= items.length) {
+        db.run(
+          'INSERT INTO orders (customer_id, total_amount) VALUES (?, ?)',
+          [decoded.id, total],
+          function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+            
+            const orderId = this.lastID;
+            let inserted = 0;
+            
+            for (const oi of orderItems) {
+              db.run(
+                'INSERT INTO order_items (order_id, product_id, quantity, price_at_time) VALUES (?, ?, ?, ?)',
+                [orderId, oi.product_id, oi.quantity, oi.price_at_time],
+                function(err) {
+                  if (err) return res.status(500).json({ error: err.message });
+                  inserted++;
+                  if (inserted === orderItems.length) {
+                    res.json({ message: '✅ سفارش ثبت شد', order_id: orderId, total });
+                  }
+                }
+              );
+            }
+          }
+        );
+        return;
+      }
+      
+      const item = items[processed];
+      db.get('SELECT * FROM products WHERE id = ?', [item.product_id], (err, product) => {
+        if (err || !product) {
+          return res.status(400).json({ error: `محصول ${item.product_id} یافت نشد` });
+        }
+        if (product.stock_quantity < item.quantity) {
+          return res.status(400).json({ error: `موجودی ${product.name} کافی نیست` });
+        }
+        
+        db.run(
+          'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?',
+          [item.quantity, item.product_id]
+        );
+        
+        total += product.price * item.quantity;
+        orderItems.push({ 
+          product_id: item.product_id, 
+          quantity: item.quantity, 
+          price_at_time: product.price 
+        });
+        
+        processed++;
+        checkProducts();
+      });
+    };
+    
+    checkProducts();
+    
+  } catch (err) {
+    res.status(401).json({ error: 'توکن نامعتبر' });
+  }
+});
+
+// گزارش مدیر
+app.get('/api/admin/reports', (req, res) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'وارد شوید' });
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'دسترسی غیرمجاز' });
+    }
+    
+    db.all(`
+      SELECT o.*, u.username as customer_name 
+      FROM orders o 
+      JOIN users u ON o.customer_id = u.id 
+      ORDER BY o.created_at DESC
+    `, (err, orders) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(orders);
+    });
+  } catch (err) {
+    res.status(401).json({ error: 'توکن نامعتبر' });
+  }
+});
+
+// ============ اجرای سرور ============
+app.listen(PORT, () => {
+  console.log(`🚀 سرور روی پورت ${PORT} اجرا شد`);
+});
