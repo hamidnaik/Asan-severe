@@ -238,3 +238,25 @@ setupInitialAdmin().then(() => {
         console.log(`🚀 سرور آسان‌خدمت V3 روی پورت ${PORT} اجرا شد`);
     });
 });
+async function startServer() {
+    try {
+        await pool.query('SELECT 1');
+
+        console.log('✅ PostgreSQL متصل شد');
+
+        app.listen(PORT, '0.0.0.0', () => {
+            console.log(`🇦🇫 بازار افغانستان روی پورت ${PORT} اجرا شد`);
+            console.log(`🚀 Bazar Afghanistan API is running on port ${PORT}`);
+        });
+
+    } catch (error) {
+        console.error(
+            '❌ اتصال به PostgreSQL برقرار نشد:',
+            error.message
+        );
+
+        process.exit(1);
+    }
+}
+
+startServer();
