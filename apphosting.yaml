@@ -1,0 +1,5 @@
+runConfig:
+  runtime: nodejs22
+  minInstances: 0
+  maxInstances: 10
+  concurrency: 80
